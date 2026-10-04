@@ -63,9 +63,8 @@ export default function Index() {
         <Text style={styles.duration}>
           {totalSleep ?? "--"}
         </Text>
-      
-      <Text style={styles.durationLabel}>Total Sleep</Text>
-      <View style={styles.divider} />
+        <Text style={styles.durationLabel}>Total Sleep</Text>
+        <View style={styles.divider} />
       </View>
     </View>
   );  
@@ -74,7 +73,7 @@ export default function Index() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#eae7e2",
+    backgroundColor: "#d7a348",
     paddingHorizontal: 24,
     paddingTop: 70,
   },
@@ -92,7 +91,7 @@ const styles = StyleSheet.create({
   },
 
   card: {
-    backgroundColor: "#ffffff",
+    backgroundColor: "#c5cfda",
     borderRadius: 18,
     padding: 24,
   },
