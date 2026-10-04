@@ -18,16 +18,16 @@
  */
 
 export const ASLEEP_VALUES = new Set([
-  "HKCategoryValueSleepAnalysisAsleepCore",
-  "HKCategoryValueSleepAnalysisAsleepDeep",
-  "HKCategoryValueSleepAnalysisAsleepREM",
-  "HKCategoryValueSleepAnalysisAsleepUnspecified",
+  1, // HKCategoryValueSleepAnalysisAsleepCore
+  3, // HKCategoryValueSleepAnalysisAsleepDeep
+  4, // HKCategoryValueSleepAnalysisAsleepREM
+  5, // HKCategoryValueSleepAnalysisAsleepUnspecified
 ]);
 
 export type RawSleepRecord = {
   startDate: string | Date;
   endDate: string | Date;
-  value: string;
+  value: number;
   sourceName?: string;
 };
 

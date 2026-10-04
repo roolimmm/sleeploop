@@ -4,7 +4,7 @@
     "slug": "sleeploop",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/sleeploop.png",
     "scheme": "sleeploop",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -98,6 +98,14 @@
         {
           "healthSharePermission": "SleepLoop reads your sleep data to analyse your sleep patterns.",
           "healthUpdatePermission": "SleepLoop may save health-related information with your permission."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "enableSceneSupport": true
+          }
         }
       ]
     ],

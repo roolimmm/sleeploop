@@ -1,40 +1,74 @@
-import { Text, View, StyleSheet } from "react-native";
+import * as HealthKit from "@appeeky/expo-healthkit";
+import { useEffect, useState } from "react";
+import { StyleSheet, Text, View } from "react-native";
+import { processSleepData } from "../../utils/sleepProcessing";
 
 export default function Index() {
-  // Temporary data for UI testing.
-  // Later, these values will come from sleepProcessing.ts / HealthKit.
-  const lastNight = {
-    duration: "6 h 17 min",
-    sleepOnset: "12:12 AM",
-    wakeTime: "6:28 AM",
+  const [totalSleep, setTotalSleep] = useState<string | null>(null);
+  const requestHealthKitPermission = async () => {
+    try {
+      await HealthKit.requestAuthorization({
+        toRead: [HealthKit.CategoryType.sleepAnalysis],
+        toShare: [],
+      });
+      
+      console.log("HealthKit permission requested successfully");
+
+      const startDate = new Date("2026-09-15T00:00:00");
+      const endDate = new Date("2026-09-17T00:00:00");
+      
+      const samples = await HealthKit.queryCategorySamples({
+        type: HealthKit.CategoryType.sleepAnalysis,
+        from: startDate,
+        to: endDate,
+        ascending: true,
+      });
+      
+      console.log("Number of raw sleep samples:", samples.length);
+      
+      const processed = processSleepData(samples);
+      
+      console.log(
+        "Number of processed nights:",
+        processed.nightlyRecords.length
+      );
+      
+      console.log(
+        "Nightly records:",
+        processed.nightlyRecords
+      );
+
+      if (processed.nightlyRecords.length > 0) {
+      const latestNight =   processed.nightlyRecords[processed.nightlyRecords.length - 1];
+      const hours = Math.floor(latestNight.totalSleepMinutes / 60);
+      const minutes = Math.round(latestNight.totalSleepMinutes % 60);
+      setTotalSleep(`${hours} h ${minutes} min`);
+    }
+  } catch (error) {
+    console.log("HealthKit error:", error);
+   }
   };
+
+  useEffect(() => {
+    requestHealthKitPermission();
+  }, []);
 
   return (
     <View style={styles.container}>
       <Text style={styles.greeting}>Good morning!</Text>
-
+      
       <Text style={styles.sectionTitle}>LAST NIGHT</Text>
 
       <View style={styles.card}>
-        <Text style={styles.duration}>{lastNight.duration}</Text>
-        <Text style={styles.durationLabel}>Total Sleep</Text>
-
-        <View style={styles.divider} />
-
-        <View style={styles.timeRow}>
-          <View style={styles.timeBlock}>
-            <Text style={styles.time}>{lastNight.sleepOnset}</Text>
-            <Text style={styles.timeLabel}>Fell asleep</Text>
-          </View>
-
-          <View style={styles.timeBlock}>
-            <Text style={styles.time}>{lastNight.wakeTime}</Text>
-            <Text style={styles.timeLabel}>Woke up</Text>
-          </View>
-        </View>
+        <Text style={styles.duration}>
+          {totalSleep ?? "--"}
+        </Text>
+      
+      <Text style={styles.durationLabel}>Total Sleep</Text>
+      <View style={styles.divider} />
       </View>
     </View>
-  );
+  );  
 }
 
 const styles = StyleSheet.create({
