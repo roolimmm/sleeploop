@@ -5,9 +5,6 @@
  *   Convert raw Apple Health / HealthKit sleep-stage records into
  *   nightly SleepRecord objects, then compute multi-night summary statistics.
  *
- * This mirrors the current Python preprocessing logic, but is structured
- * for later use inside the React Native / Expo SleepLoop application.
- *
  * Notes:
  * - Core / Deep / REM / AsleepUnspecified are all treated simply as "asleep".
  * - Awake and InBed records are ignored.

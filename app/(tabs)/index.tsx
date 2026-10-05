@@ -1,10 +1,12 @@
 import * as HealthKit from "@appeeky/expo-healthkit";
 import { useEffect, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Button, StyleSheet, Text, View } from "react-native";
+import BedtimeModal from "../../components/BedtimeModal";
 import { processSleepData } from "../../utils/sleepProcessing";
 
 export default function Index() {
   const [totalSleep, setTotalSleep] = useState<string | null>(null);
+  const [showBedtimeModal, setShowBedtimeModal] = useState(false);
   const requestHealthKitPermission = async () => {
     try {
       await HealthKit.requestAuthorization({
@@ -14,8 +16,9 @@ export default function Index() {
       
       console.log("HealthKit permission requested successfully");
 
-      const startDate = new Date("2026-09-15T00:00:00");
-      const endDate = new Date("2026-09-17T00:00:00");
+      const endDate = new Date();
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - 7);
       
       const samples = await HealthKit.queryCategorySamples({
         type: HealthKit.CategoryType.sleepAnalysis,
@@ -59,6 +62,11 @@ export default function Index() {
       
       <Text style={styles.sectionTitle}>LAST NIGHT</Text>
 
+      <Button
+      title="Plan tonight's bedtime"
+      onPress={() => setShowBedtimeModal(true)}
+      />
+
       <View style={styles.card}>
         <Text style={styles.duration}>
           {totalSleep ?? "--"}
@@ -66,6 +74,10 @@ export default function Index() {
         <Text style={styles.durationLabel}>Total Sleep</Text>
         <View style={styles.divider} />
       </View>
+      
+      <BedtimeModal
+      visible={showBedtimeModal}
+      onClose={() => setShowBedtimeModal(false)}/>
     </View>
   );  
 }
