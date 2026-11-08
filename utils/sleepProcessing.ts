@@ -11,7 +11,6 @@
  * - Overlapping asleep intervals are merged to avoid double-counting.
  * - A 12:00 noon boundary is currently used to group evening + following
  *   morning sleep into one night.
- * - The default insufficient-sleep threshold is 7 hours for the prototype.
  */
 
 export const ASLEEP_VALUES = new Set([
@@ -74,22 +73,6 @@ export type SleepSummary = {
     range: string;
     variabilitySdMinutes: number;
   };
-
-  insufficientSleep: {
-    thresholdHours: number;
-    nightsBelowThreshold: number;
-    percentageBelowThreshold: number;
-
-    averageBedtimeShortNights: string;
-    averageBedtimeSufficientNights: string;
-    bedtimeDifferenceMinutes: number | null;
-    bedtimeDifferenceText: string;
-
-    averageWakeShortNights: string;
-    averageWakeSufficientNights: string;
-    wakeDifferenceMinutes: number | null;
-    wakeDifferenceText: string;
-  };
 };
 
 type Interval = {
@@ -98,7 +81,7 @@ type Interval = {
 };
 
 function toDate(value: string | Date): Date {
-  const d = value instanceof Date ? new Date(value) : new Date(value);
+  const d = new Date(value);
 
   if (Number.isNaN(d.getTime())) {
     throw new Error(`Invalid date value: ${String(value)}`);
@@ -117,11 +100,10 @@ function formatLocalDate(date: Date): string {
 
 /**
  * Uses 12 noon as the current boundary between nights.
- *
  * Examples:
  *   11:30 PM on 1 Sep -> nightDate = 1 Sep
  *   02:00 AM on 2 Sep -> nightDate = 1 Sep
- */
+ **/
 export function getNightDate(start: Date): string {
   const d = new Date(start);
 
@@ -157,13 +139,11 @@ function mergeIntervals(intervals: Interval[]): Interval[] {
 
 /**
  * Converts a clock time onto a continuous overnight timeline.
- *
  * Example:
  *   11:30 PM -> 1410
  *   12:30 AM -> 1470
- *
  * This prevents midnight from making nearby sleep times appear far apart.
- */
+ **/
 function overnightMinutes(date: Date): number {
   const clockMinutes =
     date.getHours() * 60 +
@@ -270,42 +250,11 @@ function calculateTimeStats(
   };
 }
 
-function meanClock(
-  records: SleepRecord[],
-  key: "sleepOnset" | "wakeTime"
-): number | null {
-  if (records.length === 0) return null;
 
-  return mean(records.map((r) => overnightMinutes(r[key])));
-}
+// ==================================================
+// STEP 1 : Convert raw HealthKit sleep-stage records into one SleepRecord per night
+// ==================================================
 
-function differenceText(
-  value: number | null,
-  positiveWord: string,
-  negativeWord: string
-): string {
-  if (value === null) return "";
-
-  if (Math.abs(value) < 0.05) {
-    return "No meaningful difference";
-  }
-
-  const direction = value > 0 ? positiveWord : negativeWord;
-  const minutes = Math.abs(value);
-
-  if (minutes >= 60) {
-    const hours = Math.floor(minutes / 60);
-    const mins = Math.round(minutes % 60);
-    return `${hours} h ${mins} min ${direction}`;
-  }
-
-  return `${round(minutes, 1)} min ${direction}`;
-}
-
-/**
- * STEP 1:
- * Convert raw HealthKit sleep-stage records into one SleepRecord per night.
- */
 export function buildNightlySleepRecords(
   rawRecords: RawSleepRecord[]
 ): SleepRecord[] {
@@ -370,7 +319,7 @@ export function buildNightlySleepRecords(
 /**
  * Optional helper equivalent to the Python --start / --end filter.
  * Filtering is based on wakeDate.
- */
+ **/
 export function filterSleepRecordsByWakeDate(
   records: SleepRecord[],
   start?: string,
@@ -383,13 +332,11 @@ export function filterSleepRecordsByWakeDate(
   });
 }
 
-/**
- * STEP 2:
- * Calculate the same multi-night descriptive statistics as the Python pipeline.
- */
+// ==================================================
+// STEP 2: Calculate the same multi-night descriptive statistics
+// ==================================================
 export function analyseSleepRecords(
-  records: SleepRecord[],
-  thresholdHours = 7
+  records: SleepRecord[]
 ): SleepSummary | null {
   if (records.length === 0) {
     return null;
@@ -400,29 +347,6 @@ export function analyseSleepRecords(
 
   const durations = records.map((r) => r.totalSleepMinutes);
 
-  const shortNights = records.filter(
-    (r) => r.totalSleepHours < thresholdHours
-  );
-
-  const sufficientNights = records.filter(
-    (r) => r.totalSleepHours >= thresholdHours
-  );
-
-  const shortOnset = meanClock(shortNights, "sleepOnset");
-  const sufficientOnset = meanClock(sufficientNights, "sleepOnset");
-
-  const shortWake = meanClock(shortNights, "wakeTime");
-  const sufficientWake = meanClock(sufficientNights, "wakeTime");
-
-  const onsetDifference =
-    shortOnset !== null && sufficientOnset !== null
-      ? round(shortOnset - sufficientOnset, 1)
-      : null;
-
-  const wakeDifference =
-    shortWake !== null && sufficientWake !== null
-      ? round(shortWake - sufficientWake, 1)
-      : null;
 
   return {
     numberOfNights: records.length,
@@ -461,53 +385,22 @@ export function analyseSleepRecords(
         1
       ),
     },
-
-    insufficientSleep: {
-      thresholdHours,
-      nightsBelowThreshold: shortNights.length,
-      percentageBelowThreshold: round(
-        (100 * shortNights.length) / records.length,
-        1
-      ),
-
-      averageBedtimeShortNights: formatClockFromMinutes(shortOnset),
-      averageBedtimeSufficientNights:
-        formatClockFromMinutes(sufficientOnset),
-      bedtimeDifferenceMinutes: onsetDifference,
-      bedtimeDifferenceText: differenceText(
-        onsetDifference,
-        "later",
-        "earlier"
-      ),
-
-      averageWakeShortNights: formatClockFromMinutes(shortWake),
-      averageWakeSufficientNights:
-        formatClockFromMinutes(sufficientWake),
-      wakeDifferenceMinutes: wakeDifference,
-      wakeDifferenceText: differenceText(
-        wakeDifference,
-        "later",
-        "earlier"
-      ),
-    },
   };
 }
 
 /**
- * Convenience function for the app.
- *
+ * Convenience function for the app
  * Raw HealthKit records
  *       ↓
  * Nightly SleepRecord[]
  *       ↓
  * Summary statistics
- */
+ **/
 export function processSleepData(
   rawRecords: RawSleepRecord[],
   options?: {
     startDate?: string;
     endDate?: string;
-    insufficientSleepThresholdHours?: number;
   }
 ): {
   nightlyRecords: SleepRecord[];
@@ -521,10 +414,7 @@ export function processSleepData(
     options?.endDate
   );
 
-  const summary = analyseSleepRecords(
-    nightlyRecords,
-    options?.insufficientSleepThresholdHours ?? 7
-  );
+  const summary = analyseSleepRecords(nightlyRecords);
 
   return {
     nightlyRecords,
