@@ -19,8 +19,12 @@ import {
   detectRecurringInsufficientSleep,
 } from "../../utils/patternDetection";
 
-import { exportSleepCSV } from "../../utils/sleepExport";
 import { processSleepData } from "../../utils/sleepProcessing";
+
+import {
+  formatPredictedTime,
+  predictUpcomingSleep,
+} from "../../utils/sleepPrediction";
 
 const BEHAVIOURAL_PROFILE_KEY = "sleepBehaviouralProfile";
 
@@ -84,13 +88,76 @@ export default function Index() {
 
       // PROCESS SLEEP DATA
       const { nightlyRecords, summary } = processSleepData(samples);
+
+      // ===============================================
+      // RIDGE REGRESSION: TEST OCTOBER 20 PREDICTION
+      // ===============================================
+
+      // The evening date of the sleep period we want to predict.
+      const targetNightDate = "2026-10-20";
+
+      // Predict using only sleep records before October 19.
+      // sleepPrediction.ts handles the historical filtering.
+      const predictionResult = predictUpcomingSleep(
+        nightlyRecords,
+        targetNightDate
+      );
+
+      console.log("========== SleepLoop Sleep Prediction ==========");
+      console.log("Target night:", targetNightDate);
+      console.log("Prediction status:", predictionResult.status);
+
+      if (predictionResult.status === "ready") {
+        const prediction = predictionResult.prediction;
+
+      console.log(
+        "Predicted sleep onset:",
+        formatPredictedTime(prediction.predictedOnsetMinutes)
+      );
+
+      console.log(
+        "Predicted wake time:",
+        formatPredictedTime(prediction.predictedWakeMinutes)
+      );
+
+      console.log(
+        "Predicted sleep duration:",
+        formatDuration(prediction.predictedDurationMinutes)
+      );
+
+      console.log(
+        "Training examples:",
+        prediction.trainingExamples
+      );
+
+      console.log(
+        "Days since last record:",
+        prediction.daysSinceLastRecord
+      );
+
+      console.log(
+        "Baseline sleep onset:",
+        formatPredictedTime(prediction.baselineOnsetMinutes)
+      );
+
+      console.log(
+       "Baseline wake time:",
+       formatPredictedTime(prediction.baselineWakeMinutes)
+      );
+      
+      } else {
+        console.log(
+          "Prediction unavailable:",
+          predictionResult.reason
+        );
+      }
       
       // Temporary: automatically export sleep data for ML training
-      try {
-        await exportSleepCSV(nightlyRecords);
-      } catch (error) {
-        console.error("Failed to export sleep CSV:", error);
-      }
+      //try {
+      //  await exportSleepCSV(nightlyRecords);
+      //} catch (error) {
+      //  console.error("Failed to export sleep CSV:", error);
+      //}
 
       // DETECT BEHAVIOURAL PATTERNS
       // Pattern 1: Recurring insufficient sleep
