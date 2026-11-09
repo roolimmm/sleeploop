@@ -16,7 +16,7 @@ export default function RootLayout() {
       />
       
     <Tabs.Screen
-    name="insights"
+    name="profile"
     options={{
       tabBarIcon: () => <Ionicons name="information-circle" size={24} />
     }}

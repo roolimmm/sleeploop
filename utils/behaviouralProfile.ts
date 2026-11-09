@@ -2,9 +2,9 @@
 import type { SleepSummary } from "./sleepProcessing";
 
 import type {
-    BedtimePatternResult,
     DetectionStatus,
     InsufficientSleepResult,
+    IrregularSleepResult,
 } from "./patternDetection";
 
 export interface SleepBehaviouralProfile {
@@ -27,18 +27,20 @@ export interface SleepBehaviouralProfile {
     wakeTimeVariabilityMinutes: number;
   };
 
-  // Detected behavioural patterns
+  // Preliminary behavioural patterns
   patterns: {
-    delayedSleepOnset: {
-      status: DetectionStatus;
-      percentageDelayed: number;
-      averageDelayMinutes: number;
-    };
-
     insufficientSleep: {
       status: DetectionStatus;
       percentageInsufficient: number;
       averageInsufficientHours: number | null;
+    };
+
+    irregularSleep: {
+      status: DetectionStatus;
+      irregularSleepOnset: boolean;
+      irregularWakeTime: boolean;
+      sleepOnsetVariabilityMinutes: number;
+      wakeTimeVariabilityMinutes: number;
     };
   };
 
@@ -49,8 +51,8 @@ export interface SleepBehaviouralProfile {
 
 export function generateBehaviouralProfile(
   summary: SleepSummary | null,
-  bedtimePattern: BedtimePatternResult,
-  insufficientSleepPattern: InsufficientSleepResult
+  insufficientSleepPattern: InsufficientSleepResult,
+  irregularSleepPattern: IrregularSleepResult
 ): SleepBehaviouralProfile | null {
   // 1. Validate available sleep data
   if (summary === null || summary.numberOfNights === 0) {
@@ -60,12 +62,12 @@ export function generateBehaviouralProfile(
   // 2. Identify detected behavioural patterns
   const detectedPatterns: string[] = [];
 
-  if (bedtimePattern.status === "detected") {
-    detectedPatterns.push("delayed_sleep_onset");
-  }
-
   if (insufficientSleepPattern.status === "detected") {
     detectedPatterns.push("insufficient_sleep");
+  }
+
+  if (irregularSleepPattern.status === "detected") {
+    detectedPatterns.push("irregular_sleep");
   }
 
   // 3. Combine sleep statistics and pattern results
@@ -90,20 +92,24 @@ export function generateBehaviouralProfile(
     },
 
     patterns: {
-      delayedSleepOnset: {
-        status: bedtimePattern.status,
-        percentageDelayed:
-          bedtimePattern.percentageDelayed,
-        averageDelayMinutes:
-          bedtimePattern.averageDelayMinutes,
-      },
-
       insufficientSleep: {
         status: insufficientSleepPattern.status,
         percentageInsufficient:
           insufficientSleepPattern.percentageInsufficient,
         averageInsufficientHours:
           insufficientSleepPattern.averageInsufficientHours,
+      },
+
+      irregularSleep: {
+        status: irregularSleepPattern.status,
+        irregularSleepOnset:
+          irregularSleepPattern.irregularSleepOnset,
+        irregularWakeTime:
+          irregularSleepPattern.irregularWakeTime,
+        sleepOnsetVariabilityMinutes:
+          irregularSleepPattern.sleepOnsetVariabilityMinutes,
+        wakeTimeVariabilityMinutes:
+          irregularSleepPattern.wakeTimeVariabilityMinutes,
       },
     },
 

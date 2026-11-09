@@ -1,595 +1,202 @@
-
-import type {
-    BedtimeDelay,
-} from "./patternDetection";
+/**
+ * SleepLoop: on-device Ridge sleep prediction.
+ * Mirrors the features, StandardScaler and Ridge(alpha=10) in ml/train.py.
+ * Assumes the phone's time zone is Asia/Singapore, matching Python TIMEZONE.
+ * No external ML package required.
+ */
 import type { SleepRecord } from "./sleepProcessing";
 
-// ==================================================
-// SLEEPLOOP NEXT-NIGHT PREDICTION
-// Statistical baseline — Version 1
-// ==================================================
+const MIN_TRAIN = 8;
+const ALPHA = 10;
+const MAX_GAP_DAYS = 7;
+const DAY_MS = 86_400_000;
 
-export type PredictionRiskLevel =
-  | "low"
-  | "moderate"
-  | "high"
-  | "unknown";
+type Vector = number[];
+export type SleepPrediction = {
+  nightDate: string; // evening date; wake is usually the following morning
+  predictedOnsetMinutes: number; // 23:30=1410, 00:30=1470
+  predictedWakeMinutes: number; // clock minutes from midnight
+  predictedDurationMinutes: number; // actual asleep minutes, not time in bed
+  baselineOnsetMinutes: number;
+  baselineWakeMinutes: number;
+  baselineDurationMinutes: number;
+  trainingExamples: number;
+  daysSinceLastRecord: number;
+};
+export type PredictionResult =
+  | { status: "ready"; prediction: SleepPrediction }
+  | { status: "insufficient_data" | "stale_data" | "invalid_target"; reason: string };
 
-export interface SleepPrediction {
-  generatedAt: string;
-  targetNightDate: string;
-  method: "recency_weighted_baseline";
+type Night = { nightDate: string; onset: number; wake: number; duration: number };
+type Example = { date: string; x: Vector; y: Vector };
 
-  dataQuality: {
-    validNights: number;
-    recentNightsUsed: number;
-    minimumNightsRequired: number;
-    sufficientData: boolean;
-  };
-
-  predictedSleep: {
-    sleepOnset: string;
-    wakeTime: string;
-    durationHours: number;
-  } | null;
-
-  risks: {
-    delayedSleepOnset: {
-      level: PredictionRiskLevel;
-      estimatedPercentage: number | null;
-      plannedBedtime: string | null;
-    };
-
-    insufficientSleep: {
-      level: PredictionRiskLevel;
-      estimatedPercentage: number | null;
-    };
-
-    irregularSleep: {
-      level: PredictionRiskLevel;
-      estimatedPercentage: number | null;
-    };
-  };
+function utcDayNumber(isoDate: string): number {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return NaN;
+  const ms = Date.parse(`${isoDate}T00:00:00Z`);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 10) !== isoDate) return NaN;
+  return Math.floor(ms / DAY_MS);
 }
-
-// ==================================================
-// CONFIGURATION
-// ==================================================
-
-const DEFAULT_RECENT_NIGHTS = 7;
-const MINIMUM_NIGHTS = 5;
-
-const INSUFFICIENT_SLEEP_HOURS = 7;
-const DELAY_THRESHOLD_MINUTES = 30;
-const IRREGULAR_THRESHOLD_MINUTES = 60;
-
-// ==================================================
-// HELPERS
-// ==================================================
-
-function round(
-  value: number,
-  decimals = 1
-): number {
-  const factor = 10 ** decimals;
-  return Math.round(value * factor) / factor;
+function dayGap(later: string, earlier: string): number {
+  return utcDayNumber(later) - utcDayNumber(earlier);
 }
-
-function weightedMean(
-  values: number[]
-): number {
-  if (values.length === 0) return 0;
-
-  let weightedSum = 0;
-  let totalWeight = 0;
-
-  values.forEach((value, index) => {
-    const weight = index + 1;
-
-    weightedSum += value * weight;
-    totalWeight += weight;
-  });
-
-  return weightedSum / totalWeight;
+function wakeWeekday(nightDate: string): number {
+  // JS UTC Sunday=0; Python Monday=0. Wake date = nightDate + 1 day.
+  const wakeDay = new Date((utcDayNumber(nightDate) + 1) * DAY_MS).getUTCDay();
+  return (wakeDay + 6) % 7;
 }
-
-function weightedPercentage(
-  flags: boolean[]
-): number {
-  if (flags.length === 0) return 0;
-
-  let flaggedWeight = 0;
-  let totalWeight = 0;
-
-  flags.forEach((flag, index) => {
-    const weight = index + 1;
-
-    totalWeight += weight;
-
-    if (flag) {
-      flaggedWeight += weight;
-    }
-  });
-
-  return round(
-    (flaggedWeight / totalWeight) * 100,
-    1
-  );
+function clockMinutes(date: Date): number {
+  return date.getHours() * 60 + date.getMinutes() + date.getSeconds() / 60;
 }
-
-function weightedStandardDeviation(
-  values: number[]
-): number {
-  if (values.length <= 1) return 0;
-
-  const average = weightedMean(values);
-
-  let weightedSquaredDifference = 0;
-  let totalWeight = 0;
-
-  values.forEach((value, index) => {
-    const weight = index + 1;
-
-    weightedSquaredDifference +=
-      weight * (value - average) ** 2;
-
-    totalWeight += weight;
-  });
-
-  return Math.sqrt(
-    weightedSquaredDifference / totalWeight
-  );
+function overnightMinutes(date: Date): number {
+  const minutes = clockMinutes(date);
+  return minutes < 720 ? minutes + 1440 : minutes;
 }
-
-// --------------------------------------------------
-// Convert Date into overnight clock minutes
-//
-// 11:30 PM -> 1410
-// 12:30 AM -> 1470
-// --------------------------------------------------
-
-function overnightMinutes(
-  date: Date
-): number {
-  const hours = date.getHours();
-  const minutes =
-    hours * 60 +
-    date.getMinutes() +
-    date.getSeconds() / 60;
-
-  return hours < 12
-    ? minutes + 1440
-    : minutes;
-}
-
-// --------------------------------------------------
-// Convert minutes into readable clock time
-// --------------------------------------------------
-
-function formatClock(
-  minutes: number
-): string {
-  const normalized =
-    ((Math.round(minutes) % 1440) + 1440) %
-    1440;
-
-  const hours24 = Math.floor(
-    normalized / 60
-  );
-
-  const mins = normalized % 60;
-
-  const hours12 = hours24 % 12 || 12;
-  const suffix =
-    hours24 < 12 ? "AM" : "PM";
-
-  return (
-    `${hours12}:` +
-    `${String(mins).padStart(2, "0")} ` +
-    suffix
-  );
-}
-
-// --------------------------------------------------
-// Convert percentage into a risk category
-// --------------------------------------------------
-
-function classifyRisk(
-  percentage: number | null
-): PredictionRiskLevel {
-  if (percentage === null) return "unknown";
-
-  if (percentage >= 60) return "high";
-  if (percentage >= 30) return "moderate";
-
-  return "low";
-}
-
-// --------------------------------------------------
-// Determine next night date
-// --------------------------------------------------
-
-function nextNightDate(
-  nightDate: string
-): string {
-  const date = new Date(
-    `${nightDate}T12:00:00Z`
-  );
-
-  date.setUTCDate(
-    date.getUTCDate() + 1
-  );
-
-  return date.toISOString().slice(0, 10);
-}
-
-// --------------------------------------------------
-// Convert planned bedtime HH:mm into
-// overnight minutes
-// --------------------------------------------------
-
-function plannedBedtimeMinutes(
-  plannedBedtime: string
-): number | null {
-  const match = /^(\d{1,2}):(\d{2})$/.exec(
-    plannedBedtime
-  );
-
-  if (!match) return null;
-
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-
-  if (
-    hours < 0 ||
-    hours > 23 ||
-    minutes < 0 ||
-    minutes > 59
-  ) {
-    return null;
+function prepareNights(records: SleepRecord[]): Night[] {
+  const byDate = new Map<string, Night>();
+  // Stable ordering + keep first record per date, as Python drop_duplicates does.
+  for (const r of records) {
+    const onset = new Date(r.sleepOnset);
+    const wake = new Date(r.wakeTime);
+    if (!Number.isFinite(utcDayNumber(r.nightDate)) ||
+        !Number.isFinite(onset.getTime()) || !Number.isFinite(wake.getTime()) ||
+        !Number.isFinite(r.totalSleepMinutes) || r.totalSleepMinutes <= 0 ||
+        r.totalSleepMinutes > 1440 || byDate.has(r.nightDate)) continue;
+    byDate.set(r.nightDate, {
+      nightDate: r.nightDate,
+      onset: overnightMinutes(onset),
+      wake: clockMinutes(wake),
+      duration: r.totalSleepMinutes,
+    });
   }
-
-  const total = hours * 60 + minutes;
-
-  return hours < 12
-    ? total + 1440
-    : total;
+  return [...byDate.values()].sort((a, b) => a.nightDate.localeCompare(b.nightDate));
 }
-
-// ==================================================
-// MAIN PREDICTION FUNCTION
-// ==================================================
-
-export function predictNextNightSleep(
-  sleepRecords: SleepRecord[],
-  bedtimeDelays: BedtimeDelay[] = [],
-  nextPlannedBedtime: string | null = null,
-  recentNightLimit = DEFAULT_RECENT_NIGHTS
-): SleepPrediction {
-  // --------------------------------------------------
-  // 1. Validate and sort sleep records
-  // --------------------------------------------------
-
-  const validRecords = sleepRecords
-    .filter((record) => {
-      return (
-        record.sleepOnset instanceof Date &&
-        record.wakeTime instanceof Date &&
-        !Number.isNaN(
-          record.sleepOnset.getTime()
-        ) &&
-        !Number.isNaN(
-          record.wakeTime.getTime()
-        ) &&
-        Number.isFinite(
-          record.totalSleepHours
-        ) &&
-        record.totalSleepHours > 0 &&
-        record.totalSleepHours <= 24
-      );
-    })
-    .sort((a, b) =>
-      a.nightDate.localeCompare(
-        b.nightDate
-      )
-    );
-
-  const uniqueRecords = [
-    ...new Map(
-      validRecords.map((record) => [
-        record.nightDate,
-        record,
-      ])
-    ).values(),
+function features(date: string, previous: Night): Vector {
+  const weekday = wakeWeekday(date);
+  return [
+    Math.sin((2 * Math.PI * weekday) / 7),
+    Math.cos((2 * Math.PI * weekday) / 7),
+    previous.onset,
+    previous.wake,
+    previous.duration,
+    dayGap(date, previous.nightDate),
   ];
-
-  const recentRecords =
-    uniqueRecords.slice(
-      -Math.max(
-        1,
-        Math.floor(recentNightLimit)
-      )
-    );
-
-  const validNights =
-    uniqueRecords.length;
-
-  const sufficientData =
-    recentRecords.length >=
-    MINIMUM_NIGHTS;
-
-  const targetNightDate =
-    uniqueRecords.length > 0
-      ? nextNightDate(
-          uniqueRecords[
-            uniqueRecords.length - 1
-          ].nightDate
-        )
-      : "";
-
-  // --------------------------------------------------
-  // 2. Handle insufficient data
-  // --------------------------------------------------
-
-  if (!sufficientData) {
-    return {
-      generatedAt: new Date().toISOString(),
-      targetNightDate,
-      method: "recency_weighted_baseline",
-
-      dataQuality: {
-        validNights,
-        recentNightsUsed:
-          recentRecords.length,
-        minimumNightsRequired:
-          MINIMUM_NIGHTS,
-        sufficientData: false,
-      },
-
-      predictedSleep: null,
-
-      risks: {
-        delayedSleepOnset: {
-          level: "unknown",
-          estimatedPercentage: null,
-          plannedBedtime:
-            nextPlannedBedtime,
-        },
-
-        insufficientSleep: {
-          level: "unknown",
-          estimatedPercentage: null,
-        },
-
-        irregularSleep: {
-          level: "unknown",
-          estimatedPercentage: null,
-        },
-      },
-    };
+}
+function examplesFrom(nights: Night[]): Example[] {
+  const result: Example[] = [];
+  for (let i = 1; i < nights.length; i++) {
+    const gap = dayGap(nights[i].nightDate, nights[i - 1].nightDate);
+    if (gap <= 0 || gap > MAX_GAP_DAYS) continue;
+    result.push({
+      date: nights[i].nightDate,
+      x: features(nights[i].nightDate, nights[i - 1]),
+      y: [nights[i].onset, nights[i].wake, nights[i].duration],
+    });
   }
+  return result;
+}
+function mean(values: number[]): number {
+  return values.reduce((sum, x) => sum + x, 0) / values.length;
+}
 
-  // --------------------------------------------------
-  // 3. Predict sleep onset and duration
-  // --------------------------------------------------
-
-  const onsetMinutes =
-    recentRecords.map(
-      (record) =>
-        overnightMinutes(
-          record.sleepOnset
-        )
-    );
-
-  const durations =
-    recentRecords.map(
-      (record) =>
-        record.totalSleepHours
-    );
-
-  const predictedOnsetMinutes =
-    weightedMean(onsetMinutes);
-
-  const predictedDurationHours =
-    weightedMean(durations);
-
-  // --------------------------------------------------
-  // 4. Predict wake time
-  // --------------------------------------------------
-
-  const wakeMinutes =
-    recentRecords.map(
-      (record) =>
-        overnightMinutes(
-          record.wakeTime
-        )
-    );
-
-  const predictedWakeMinutes =
-    weightedMean(wakeMinutes);
-
-  // --------------------------------------------------
-  // 5. Estimate insufficient-sleep risk
-  // --------------------------------------------------
-
-  const insufficientFlags =
-    recentRecords.map(
-      (record) =>
-        record.totalSleepHours <
-        INSUFFICIENT_SLEEP_HOURS
-    );
-
-  const insufficientPercentage =
-    weightedPercentage(
-      insufficientFlags
-    );
-
-  // --------------------------------------------------
-  // 6. Estimate irregular-sleep risk
-  // --------------------------------------------------
-
-  const onsetVariability =
-    weightedStandardDeviation(
-      onsetMinutes
-    );
-
-  const wakeVariability =
-    weightedStandardDeviation(
-      wakeMinutes
-    );
-
-  // Irregularity is defined as deviation from
-  // the weighted typical schedule.
-  const irregularFlags =
-    recentRecords.map(
-      (record) => {
-        const onsetDeviation =
-          Math.abs(
-            overnightMinutes(
-              record.sleepOnset
-            ) -
-            predictedOnsetMinutes
-          );
-
-        const wakeDeviation =
-          Math.abs(
-            overnightMinutes(
-              record.wakeTime
-            ) -
-            predictedWakeMinutes
-          );
-
-        return (
-          onsetDeviation >=
-            IRREGULAR_THRESHOLD_MINUTES ||
-          wakeDeviation >=
-            IRREGULAR_THRESHOLD_MINUTES
-        );
-      }
-    );
-
-  const irregularPercentage =
-    weightedPercentage(
-      irregularFlags
-    );
-
-  // --------------------------------------------------
-  // 7. Estimate delayed-sleep-onset risk
-  // --------------------------------------------------
-
-  let delayedPercentage:
-    number | null = null;
-
-  const plannedMinutes =
-    nextPlannedBedtime
-      ? plannedBedtimeMinutes(
-          nextPlannedBedtime
-        )
-      : null;
-
-  if (plannedMinutes !== null) {
-    // Predict whether the expected onset is
-    // at least 30 minutes after planned bedtime.
-    const predictedDelay =
-      predictedOnsetMinutes -
-      plannedMinutes;
-
-    // Use historical delays when available.
-    const recentDelayRecords =
-      bedtimeDelays
-        .filter((record) =>
-          Number.isFinite(
-            record.delayMinutes
-          )
-        )
-        .sort((a, b) =>
-          a.nightDate.localeCompare(
-            b.nightDate
-          )
-        )
-        .slice(-recentNightLimit);
-
-    if (recentDelayRecords.length >= 3) {
-      delayedPercentage =
-        weightedPercentage(
-          recentDelayRecords.map(
-            (record) =>
-              record.delayMinutes >=
-              DELAY_THRESHOLD_MINUTES
-          )
-        );
-    } else {
-      delayedPercentage =
-        predictedDelay >=
-        DELAY_THRESHOLD_MINUTES
-          ? 100
-          : 0;
+/** Gaussian elimination with partial pivoting; solves A * X = B. */
+function solve(a: number[][], b: number[][]): number[][] {
+  const n = a.length;
+  const m = b[0].length;
+  const matrix = a.map((row, i) => [...row, ...b[i]]);
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let r = col + 1; r < n; r++) {
+      if (Math.abs(matrix[r][col]) > Math.abs(matrix[pivot][col])) pivot = r;
+    }
+    if (Math.abs(matrix[pivot][col]) < 1e-12) throw new Error("Ridge matrix is singular");
+    [matrix[col], matrix[pivot]] = [matrix[pivot], matrix[col]];
+    const scale = matrix[col][col];
+    for (let j = col; j < n + m; j++) matrix[col][j] /= scale;
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const factor = matrix[r][col];
+      for (let j = col; j < n + m; j++) matrix[r][j] -= factor * matrix[col][j];
     }
   }
+  return matrix.map(row => row.slice(n));
+}
 
-  // --------------------------------------------------
-  // 8. Return prediction
-  // --------------------------------------------------
+/** Multi-output Ridge with StandardScaler and an unpenalized intercept. */
+function ridgePredict(train: Example[], x: Vector): Vector {
+  const p = x.length;
+  const q = train[0].y.length;
+  const means = Array.from({ length: p }, (_, j) => mean(train.map(e => e.x[j])));
+  const scales = Array.from({ length: p }, (_, j) => {
+    const variance = mean(train.map(e => (e.x[j] - means[j]) ** 2));
+    return variance > 0 ? Math.sqrt(variance) : 1; // sklearn StandardScaler
+  });
+  const yMeans = Array.from({ length: q }, (_, k) => mean(train.map(e => e.y[k])));
+  const xtx = Array.from({ length: p }, () => Array(p).fill(0));
+  const xty = Array.from({ length: p }, () => Array(q).fill(0));
+  for (const e of train) {
+    const z = e.x.map((value, j) => (value - means[j]) / scales[j]);
+    for (let j = 0; j < p; j++) {
+      for (let k = 0; k < p; k++) xtx[j][k] += z[j] * z[k];
+      for (let k = 0; k < q; k++) xty[j][k] += z[j] * (e.y[k] - yMeans[k]);
+    }
+  }
+  for (let j = 0; j < p; j++) xtx[j][j] += ALPHA;
+  const coefficients = solve(xtx, xty);
+  const z = x.map((value, j) => (value - means[j]) / scales[j]);
+  return yMeans.map((intercept, k) =>
+    intercept + z.reduce((sum, value, j) => sum + value * coefficients[j][k], 0)
+  );
+}
 
+/**
+ * Predict the sleep period beginning on targetNightDate (YYYY-MM-DD).
+ * Example: Tuesday night 2026-11-10 predicts Wednesday morning's wake.
+ */
+export function predictUpcomingSleep(
+  records: SleepRecord[],
+  targetNightDate: string
+): PredictionResult {
+  if (!Number.isFinite(utcDayNumber(targetNightDate))) {
+    return { status: "invalid_target", reason: "Target must be a valid YYYY-MM-DD date." };
+  }
+  const nights = prepareNights(records).filter(n => n.nightDate < targetNightDate);
+  if (nights.length === 0) {
+    return { status: "insufficient_data", reason: "No completed sleep records before the target night." };
+  }
+  const last = nights[nights.length - 1];
+  const gap = dayGap(targetNightDate, last.nightDate);
+  if (gap < 1) {
+    return { status: "invalid_target", reason: "Target night must follow the latest recorded night." };
+  }
+  if (gap > MAX_GAP_DAYS) {
+    return { status: "stale_data", reason: `Latest recorded night is ${gap} days before the target; maximum is ${MAX_GAP_DAYS}.` };
+  }
+  const examples = examplesFrom(nights);
+  if (examples.length < MIN_TRAIN) {
+    return { status: "insufficient_data", reason: `Only ${examples.length} usable training examples; need ${MIN_TRAIN}.` };
+  }
+  const baseline = [0, 1, 2].map(k => mean(examples.slice(-3).map(e => e.y[k])));
+  const ridge = ridgePredict(examples, features(targetNightDate, last));
   return {
-    generatedAt: new Date().toISOString(),
-    targetNightDate,
-    method: "recency_weighted_baseline",
-
-    dataQuality: {
-      validNights,
-      recentNightsUsed:
-        recentRecords.length,
-      minimumNightsRequired:
-        MINIMUM_NIGHTS,
-      sufficientData: true,
-    },
-
-    predictedSleep: {
-      sleepOnset: formatClock(
-        predictedOnsetMinutes
-      ),
-
-      wakeTime: formatClock(
-        predictedWakeMinutes
-      ),
-
-      durationHours: round(
-        predictedDurationHours,
-        2
-      ),
-    },
-
-    risks: {
-      delayedSleepOnset: {
-        level: classifyRisk(
-          delayedPercentage
-        ),
-
-        estimatedPercentage:
-          delayedPercentage,
-
-        plannedBedtime:
-          nextPlannedBedtime,
-      },
-
-      insufficientSleep: {
-        level: classifyRisk(
-          insufficientPercentage
-        ),
-
-        estimatedPercentage:
-          insufficientPercentage,
-      },
-
-      irregularSleep: {
-        level: classifyRisk(
-          irregularPercentage
-        ),
-
-        estimatedPercentage:
-          irregularPercentage,
-      },
+    status: "ready",
+    prediction: {
+      nightDate: targetNightDate,
+      predictedOnsetMinutes: ridge[0],
+      predictedWakeMinutes: ridge[1],
+      predictedDurationMinutes: ridge[2],
+      baselineOnsetMinutes: baseline[0],
+      baselineWakeMinutes: baseline[1],
+      baselineDurationMinutes: baseline[2],
+      trainingExamples: examples.length,
+      daysSinceLastRecord: gap,
     },
   };
+}
+
+/** Display minutes as a local clock time (e.g., 1470 -> 12:30 AM). */
+export function formatPredictedTime(minutes: number): string {
+  const rounded = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  const hour = Math.floor(rounded / 60);
+  const minute = rounded % 60;
+  return `${hour % 12 || 12}:${String(minute).padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
 }
